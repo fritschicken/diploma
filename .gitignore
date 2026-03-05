@@ -1,0 +1,19 @@
+# 1. Ignore EVERYTHING in the root directory
+/*
+
+# 2. Allow only the essential configuration files in the root
+!/.gitignore
+!/pyproject.toml
+!/README.md
+
+# 3. Allow the ENTIRE lib folder and everything inside it
+!/lib/
+!/lib/**
+
+# 4. Explicitly block the build junk inside lib (to keep it clean)
+/lib/build/
+/lib/*.egg-info/
+
+# 5. Global cleanup
+**/__pycache__/
+**/*.pyc
