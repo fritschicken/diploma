@@ -9,4 +9,4 @@ from .magnetic_models import (
     generate_custom_matrices,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
