@@ -3,8 +3,11 @@ import numpy as np
 import sisl as si
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
+import os
+import plotly.graph_objects as go
+from scipy.interpolate import PchipInterpolator
 
-__all__ = ['MagneticModel', 'MagneticParams', 'TopologicalInsulatorModel', 'TopologicalInsulatorParams','build_lattice_pairs','build_lattice_pairs_periodic','calculate_chemical_potential','generate_custom_matrices','plot_interactive_mu_c','plot_interactive_mu_dist']
+__all__ = ['TopologicalInsulatorModel', 'TopologicalInsulatorParams','build_lattice_pairs','build_lattice_pairs_periodic','calculate_chemical_potential','generate_custom_matrices','plot_interactive_mu_c','plot_interactive_mu_dist']
 
 # =============================================================================
 # topological_insulator_model.py
@@ -636,244 +639,7 @@ class TopologicalInsulatorModel:
         DM = self.build_density_matrix(kT=kT, mu=mu_chem)
         
         return H, DM
-
-
-@dataclass
-class MagneticParams:
-    """
-    Parameters for a standalone 2D magnetic layer.
-    """
-    b: tuple = (1, 0, 0)  # Magnetic exchange field (Bx, By, Bz)
-    t_x: float = -0.1     # Hopping in x
-    t_y: float = -0.1     # Hopping in y
-    mu: float = 0.0       # Chemical potential
-
-class MagneticModel:
-    """
-    A standalone 2D magnetic lattice model using sisl.
-    Basis: 1 atom per cell, 2 spin orbitals.
-    """
-    CELL_SIZE = 2
-
-    _SX = np.array([[0, 1], [1, 0]], dtype=complex)
-    _SY = np.array([[0, -1j], [1j, 0]], dtype=complex)
-    _SZ = np.array([[1, 0], [0, -1]], dtype=complex)
-    _S0 = np.eye(2, dtype=complex)
-
-    def __init__(self) -> None:
-        self.geom = None
-        self.H = None
-
-    def build_geometry(
-        self,
-        Nx: int,
-        Ny: int,
-        a: float,
-        abc: Optional[List[int]] = None,
-    ) -> si.Geometry:
-        """
-        Builds geometry using the user-defined boundary condition mapping.
-        """
-        self.Nx, self.Ny, self.a = Nx, Ny, a
-
-        if abc is None:
-            abc = [5, 2, 5]  # Default: periodic in y, finite in x/z
-
-        # Your original mapping logic: (2 → 3, else → 1)
-        nsc = [3 if code == 2 else 1 for code in abc]
-
-        # Single magnetic atom
-        mag_atom = si.Atom(1)
-        
-        # Lattice with your calculated nsc
-        lattice = si.Lattice([a, a, 10.0], nsc=nsc)
-        lattice.set_boundary_condition(a=abc[0], b=abc[1], c=abc[2])
-
-        # Single atom basis at center of cell
-        geom = si.Geometry([[a/2, a/2, 0]], atoms=[mag_atom], lattice=lattice)
-        self.geom = geom.tile(Nx, 0).tile(Ny, 1)
-        
-        return self.geom
-
-    def build_unit_cell(self, params: MagneticParams):
-        """Constructs 2x2 onsite and hopping matrices."""
-        sx, sy, sz, s0 = self._SX, self._SY, self._SZ, self._S0
-        
-        # Onsite: Exchange field + Chemical potential
-        self.U = params.b[0]*sx + params.b[1]*sy + params.b[2]*sz + params.mu*s0
-        
-        # Hopping: Simple scalar hopping (conserves spin)
-        self.Tx = params.t_x * s0
-        self.Ty = params.t_y * s0
-        return self.U, self.Tx, self.Ty
-
-    @staticmethod
-    def _spin_order(mat_2x2: np.ndarray) -> np.ndarray:
-        """Sisl spin-orbit vector packing."""
-        order = [0, 3, 1, 5, 4, 7, 2, 6] 
-        flat = np.append(mat_2x2.real.flatten(), mat_2x2.imag.flatten())
-        return flat[order]
-    
-    @staticmethod
-    def _spin_order_inverse(vec: np.ndarray) -> np.ndarray:
-        """
-        Inverse of _spin_order: reconstruct a 2x2 complex matrix from the 8-element
-        real spin-vector produced by _spin_order.
-
-        Parameters
-        ----------
-        vec : array-like, shape (8,)
-            Real vector = [real.flatten(), imag.flatten()] reordered by `order`.
-
-        Returns
-        -------
-        mat_2x2 : np.ndarray, shape (2,2), dtype=complex
-            Reconstructed complex 2x2 matrix.
-        """
-        order = np.array([0, 3, 1, 5, 4, 7, 2, 6])
-        v = np.asarray(vec)
-        if v.size != order.size:
-            raise ValueError(f"expected input vector of length {order.size}, got {v.size}")
-        # recover the original concatenated real+imag flat array
-        flat = np.empty(order.size, dtype=float)
-        flat[order] = v
-        real = flat[:4].reshape(2, 2)
-        imag = flat[4:].reshape(2, 2)
-        return real + 1j * imag
-
-    def build_hamiltonian(self) -> si.Hamiltonian:
-        if self.geom is None: raise ValueError("Build geometry first.")
-        
-        # Initialize SO Hamiltonian
-        H = si.Hamiltonian(self.geom, spin="spin-orbit",orthogonal = False)
-
-
-        for ia in self.geom.iter():
-            # Onsite term
-            H[ia, ia, :H.S_idx] = self._spin_order(self.U)
-            H[ia, ia ,H.S_idx] = 1
-
-            # Neighbors for hopping
-            _, neighbors = self.geom.close(ia, R=[0.1, self.a + 0.1])
-            for nb in neighbors:
-                dist = self.geom.Rij(ia, nb)
-                
-                if np.allclose(dist, [self.a, 0, 0]):
-                    H[ia, nb, :H.S_idx] = self._spin_order(self.Tx)
-                elif np.allclose(dist, [-self.a, 0, 0]):
-                    H[ia, nb, :H.S_idx] = self._spin_order(self.Tx.conj().T)
-                elif np.allclose(dist, [0, self.a, 0]):
-                    H[ia, nb, :H.S_idx] = self._spin_order(self.Ty)
-                elif np.allclose(dist, [0, -self.a, 0]):
-                    H[ia, nb, :H.S_idx] = self._spin_order(self.Ty.conj().T)
-        
-        self.H = H
-        return H
-    
-        # ---------- Helper for distrobution ----------
-    def _fermi(self, E, kT, fermi_energy):
-        if kT == 0.0:
-            return 1-np.heaviside(E,0.5)
-        else:
-            return si.fermi_dirac(E, kT=kT, mu=fermi_energy)
-    
-    def build_density_matrix(self, kT: float = 0.0, fermi_energy: float = 0.0) -> si.DensityMatrix:
-        """
-        Construct the density matrix for the magnetic layer from eigenstates.
-        """
-        if self.H is None:
-            raise ValueError("Hamiltonian not built. Call build_hamiltonian() first.")
-
-        # 1. Get Eigenstates
-        es = self.H.eigenstate()
-        
-        # 2. Define Fermi-Dirac distribution
-        # si.fermi_dirac is efficient, but we handle the T=0 case for stability
-        f = lambda E: self._fermi(E, kT=kT, fermi_energy=fermi_energy)
-        
-        # 3. Calculate occupations
-        occ = es.occupation(distribution=f)
-        
-        # 4. Construct the dense DM from eigenstates: \rho = \sum n_i |\psi_i><\psi_i|
-        # es.state has shape (total_orbitals, total_states)
-        dm_dense = np.zeros(es.state.shape, dtype=complex)
-        for i in range(es.eig.shape[0]):
-            dm_dense += occ[i] * np.outer(es.state[:, i], np.conj(es.state[:, i]))
-
-        # 5. Initialize sisl DensityMatrix object
-        DM = si.DensityMatrix(self.geom, spin="spin-orbit")
-
-        # 6. Map the dense matrix back into sisl's sparse format
-        # Each atom has 1 sisl-orbital, but because it is 'spin-orbit', 
-        # that orbital contains the 2x2 spin information.
-        nx, ny = dm_dense.shape
-        Nx, Ny, _ = DM.shape
-
-        for i in range(Nx):
-            for j in range(Ny):
-                id_x = (2 * i) % nx
-                id_y = (2 * j) % ny
-                DM[i, j] = self._spin_order(dm_dense[id_x:id_x + 2, id_y:id_y + 2])
-
-        self.DM = DM
-        return DM
-
-    def magnetic_moment(self, kT: float = 0.01, mu: float = 0.0):
-        if not hasattr(self, "DM") or self.DM is None:
-            raise ValueError("Density matrix not built. Call build_density_matrix() first.")
-
-        copy = self.DM.copy()
-        copy.set_nsc([1] * 3)
-
-        Sx_val = 0.0
-        Sy_val = 0.0
-        Sz_val = 0.0
-
-        for p in range(copy.no):
-            rho_pp_block = self._spin_order_inverse(copy[p, p])
-            Sx_val += np.trace( self._SX @ rho_pp_block).real
-            Sy_val += np.trace( self._SY @ rho_pp_block).real
-            Sz_val += np.trace( self._SZ @ rho_pp_block).real
-            
-        mu_x = -Sx_val
-        mu_y = -Sy_val
-        mu_z = -Sz_val
-        return - np.array([mu_x, mu_y, mu_z])
-    
-    def automate(self, params=None, Nx=10, Ny=1, a=1.0, abc=None, kT=0.0, mu=0.0, **kwargs):
-        """
-        Executes the full pipeline: Geometry -> Unit Cell -> Hamiltonian -> Density Matrix.
-        
-        Parameters
-        ----------
-        params : MagneticParams, optional
-            Dataclass with model parameters.
-        Nx, Ny, a : float
-            Geometry and lattice parameters.
-        abc : list, optional
-            Boundary conditions. Defaults to [5, 2, 5].
-        kT, mu : float
-            Thermal energy and chemical potential for the Density Matrix.
-        **kwargs :
-            Direct overrides for params ( e.g., b=(0,0,1) ).
-        """
-        # 1. Setup Parameters
-        if params is None:
-            params = MagneticParams(**kwargs)
-        else:
-            # Override specific dataclass fields if kwargs are provided
-            for k, v in kwargs.items():
-                if hasattr(params, k):
-                    setattr(params, k, v)
-
-        self.build_geometry(Nx=Nx, Ny=Ny, a=a, abc=abc)
-
-        # 3. Build Unit Cell Matrices
-        self.build_unit_cell(params)
-
-        # 4. Build Density Matrix
-        return self.build_hamiltonian(), self.build_density_matrix(kT=kT, mu=mu)
-    
+ 
 
 def build_lattice_pairs(Nx, Ny, radius, atoms_per_cell=1):
     """
@@ -984,9 +750,6 @@ def build_lattice_pairs_periodic(Nx, Ny, radius, atom_indices=None):
 
     return all_pairs
 
-from scipy.optimize import brentq
-from scipy.special import expit # Sigmoid function 1/(1+e^-x), numerically stable
-
 def calculate_chemical_potential(H: si.Hamiltonian, filling_per_cell: float, kT: float = 0.01) -> float:
     """
     Calculates the chemical potential (mu) for a specific filling.
@@ -1010,80 +773,6 @@ def calculate_chemical_potential(H: si.Hamiltonian, filling_per_cell: float, kT:
 
     bz = si.MonkhorstPack(H, [50,50,1])
     return H.fermi_level(bz, q=target)
-
-def generate_custom_matrices(
-    u: float = -0.28,         # TI mass (bandgap parameter)
-    t_ti: float = 0.5,        # TI normal hopping (effective mass)
-    v_ti: float = 0.5,        # TI spin-orbit hopping (Dirac velocity)
-    c_intra: float = 0.0,     # TI internal orbital coupling
-    typ: str = "asym",        # Symmetry of TI coupling
-    b: tuple = (0.0, 0.0, 0.1), # Magnetic exchange vector (bx, by, bz)
-    t_x: float = -1.0,        # Magnetic layer x-hopping
-    t_y: float = -1.0,        # Magnetic layer y-hopping
-    c_inter: float = 0.1,     # Interlayer coupling
-    mu: float = 0.0           # Magnetic layer chemical potential
-):
-    """
-    Generates customized 6x6 tight-binding matrices (U, Tx, Ty) for a 
-    Topological Insulator + Ferromagnet heterostructure.
-    """
-    # 1. Pauli Matrices
-    sx = np.array([[0, 1], [1, 0]], dtype=complex)
-    sy = np.array([[0, -1j], [1j, 0]], dtype=complex)
-    sz = np.array([[1, 0], [0, -1]], dtype=complex)
-    s0 = np.eye(2, dtype=complex)
-
-    # 2. TI Block (4x4)
-    # Intra-orbital coupling
-    if typ == "sym":
-        coup = np.kron(sx, c_intra * sx)
-    elif typ == "asym":
-        coup = np.kron(sy, c_intra * sx)
-    else:
-        raise ValueError("typ must be 'sym' or 'asym'")
-
-    # Onsite (u)
-    T0 = u * np.kron(sz, s0) + coup
-
-    # Hopping (t_ti for curvature, v_ti for Dirac velocity)
-    Tx_plus = t_ti * np.kron(sz, s0) - (v_ti * 1j) * np.kron(sx, sz)
-    Ty_plus = t_ti * np.kron(sz, s0) - (v_ti * 1j) * np.kron(sy, s0)
-
-    # 3. Magnetic Block (2x2)
-    B = b[0] * sx + b[1] * sy + b[2] * sz + mu * s0
-    B_x = t_x * s0
-    B_y = t_y * s0
-
-    # 4. Interlayer Coupling
-    TI_coup = c_inter * s0
-
-    # 5. Assemble 6x6 Matrices
-    U = np.zeros((6, 6), dtype=complex)
-    Tx = np.zeros_like(U)
-    Ty = np.zeros_like(U)
-
-    # Fill U (Onsite)
-    U[:4, :4] = T0
-    U[4:, 4:] = B
-    U[4:, 0:2] = TI_coup
-    U[0:2, 4:] = TI_coup
-    U[4:, 2:4] = TI_coup
-    U[2:4, 4:] = TI_coup
-
-    # Fill Tx (X-Hopping)
-    Tx[:4, :4] = Tx_plus
-    Tx[4:, 4:] = B_x
-
-    # Fill Ty (Y-Hopping)
-    Ty[:4, :4] = Ty_plus
-    Ty[4:, 4:] = B_y
-
-    return U, Tx, Ty
-
-import os
-import numpy as np
-import plotly.graph_objects as go
-from scipy.interpolate import PchipInterpolator
 
 def plot_interactive_mu_c(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=3):
     all_data = {}
@@ -1243,10 +932,6 @@ def plot_interactive_mu_c(save_dir, mu_values, quantity='J_iso_meV', num_neighbo
 
     fig.show()
 
-import os
-import numpy as np
-import plotly.graph_objects as go
-from scipy.interpolate import PchipInterpolator
 
 def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=5):
     """

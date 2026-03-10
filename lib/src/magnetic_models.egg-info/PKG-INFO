@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: magnetic-models
+Version: 0.1.0
+Summary: Tight-binding implementation of 2D Topological Insulators coupled to magnetic layers.
+Author-email: Laszlo Erik Fritsch <your.email@example.com>
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Scientific/Engineering :: Physics
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: sisl
