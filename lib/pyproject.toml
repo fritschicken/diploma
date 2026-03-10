@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "magnetic-models"
-version = "0.1.1"
+version = "0.1.2"
 authors = [
-  { name="Laszlo Erik Fritsch", email="your.email@example.com" },
+  { name="Laszlo Erik Fritsch", email="fryc@outlook.com" },
 ]
 description = "Tight-binding implementation of 2D Topological Insulators coupled to magnetic layers."
 readme = "README.md"
