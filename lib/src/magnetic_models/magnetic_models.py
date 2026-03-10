@@ -7,7 +7,7 @@ import os
 import plotly.graph_objects as go
 from scipy.interpolate import PchipInterpolator
 
-__all__ = ['TopologicalInsulatorModel', 'TopologicalInsulatorParams','build_lattice_pairs','build_lattice_pairs_periodic','calculate_chemical_potential','generate_custom_matrices','plot_interactive_mu_c','plot_interactive_mu_dist']
+__all__ = ['TopologicalInsulatorModel', 'TopologicalInsulatorParams','build_lattice_pairs','build_lattice_pairs_periodic','calculate_chemical_potential']
 
 # =============================================================================
 # topological_insulator_model.py
