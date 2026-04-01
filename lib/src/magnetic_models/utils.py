@@ -3,6 +3,107 @@ import numpy as np
 import plotly.graph_objects as go
 from scipy.interpolate import PchipInterpolator
 
+import matplotlib.pyplot as plt
+import ipywidgets as widgets
+from ipywidgets import interact
+
+def preload_data(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=5):
+    """Loads all files into memory once so the sliders update instantly."""
+    all_data = {}
+    unique_c, unique_b, unique_neigh = None, None, None
+    
+    print("Pre-loading data into memory...")
+    for mu in mu_values:
+        file_path = os.path.join(save_dir, f"data_mu_{mu}.npz")
+        if not os.path.exists(file_path):
+            continue
+            
+        data = np.load(file_path)
+        all_data[mu] = {
+            'y_data': data[quantity],
+            'distances': data['distances'][0]
+        }
+        
+        # Grab the axes from the first valid file
+        if unique_c is None:
+            unique_c = np.unique(np.round(data['c_inter'], 5))
+            unique_b = np.unique(np.round(data['b_val'], 5))
+            rounded_dist = np.round(data['distances'][0], 4)
+            unique_neigh = np.unique(rounded_dist)[:num_neighbors]
+            
+    return all_data, unique_c, unique_b, unique_neigh
+
+
+def interactive_dual_heatmap(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=5):
+    # 1. Pre-load everything
+    all_data, unique_c, unique_b, unique_neigh = preload_data(save_dir, mu_values, quantity, num_neighbors)
+    
+    if not all_data:
+        print("No data found! Check your directory path and mu values.")
+        return
+        
+    B, C = np.meshgrid(unique_b, unique_c)
+    
+    # 2. Define the plot function that gets called when a slider moves
+    def plot_heatmaps(mu, target_distance):
+        if mu not in all_data:
+            print(f"No data loaded for mu={mu}")
+            return
+            
+        y_data = all_data[mu]['y_data']
+        distances = all_data[mu]['distances']
+        rounded_dist = np.round(distances, 4)
+        
+        # Snap to closest distance
+        closest_dist = unique_neigh[np.argmin(np.abs(unique_neigh - target_distance))]
+        indices = np.where(np.isclose(rounded_dist, closest_dist))[0]
+        
+        # Calculate Mean and Difference
+        y_slice = y_data[:, indices]
+        y_mean_flat = np.mean(y_slice, axis=1)
+        y_diff_flat = np.ptp(y_slice, axis=1) # ptp is Peak-to-Peak (Max - Min)
+        
+        Z_mean = y_mean_flat.reshape(len(unique_c), len(unique_b))
+        Z_diff = y_diff_flat.reshape(len(unique_c), len(unique_b))
+        
+        # Create the figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        
+        # --- Left Plot: Mean ---
+        vmax = np.max(np.abs(Z_mean))
+        if vmax == 0: vmax = 1e-6 # Prevent division by zero errors if data is flat
+        vmin = -vmax #if np.min(Z_mean) < 0 else 0 
+        
+        cp1 = ax1.pcolormesh(B, C, Z_mean, shading='auto', cmap='RdBu_r', vmin=vmin, vmax=vmax)
+        #ax1.contour(B,C,Z_mean,colors='k',levels =10)
+        cbar1 = fig.colorbar(cp1, ax=ax1)
+        cbar1.set_label(f"Mean {quantity} [meV]")
+        
+        ax1.set_title("Mean Interaction Strength\n"+r"$\mu$"+f" = {mu}, Dist $\\approx$ {closest_dist:.3f}")
+        ax1.set_xlabel("Zeeman splitting (b) [eV]")
+        ax1.set_ylabel("$c_{inter}$ [eV]")
+        
+        # --- Right Plot: Spread ---
+        cp2 = ax2.pcolormesh(B, C, Z_diff, shading='auto', cmap='viridis')
+        cbar2 = fig.colorbar(cp2, ax=ax2)
+        cbar2.set_label("Max Difference (Spread) [meV]")
+        
+        ax2.set_title(f"Symmetry Breaking (Max - Min)\n"r"$\mu$ = "+f"{mu}"+f", Dist $\\approx$ {closest_dist:.3f}")
+        ax2.set_xlabel("Zeeman splitting (b) [eV]")
+        ax2.set_ylabel("$c_{inter}$ [eV]")
+        
+        plt.tight_layout()
+        plt.show()
+        
+        plt.show()
+
+    # 3. Create the UI Sliders
+    # SelectionSlider is used because your neighbor distances are specific, discrete numbers
+    mu_slider = widgets.SelectionSlider(options=list(all_data.keys()), description=r'$\mu$:')
+    dist_slider = widgets.SelectionSlider(options=list(unique_neigh), description='Distance:')
+    
+    # 4. Link the UI to the plot
+    interact(plot_heatmaps, mu=mu_slider, target_distance=dist_slider)
 
 def plot_interactive_mu_c(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=3):
     all_data = {}
