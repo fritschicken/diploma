@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from scipy.interpolate import PchipInterpolator
 
 import matplotlib.pyplot as plt
@@ -303,7 +304,15 @@ def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neig
         print("No data loaded. Please check your save_dir and mu_values.")
         return
 
-    fig = go.Figure()
+    num_c = len(unique_c)
+    subplot_titles = [f"c_inter = {np.round(c, 3)}" for c in unique_c]
+    fig = make_subplots(
+        rows=num_c, 
+        cols=1, 
+        shared_xaxes=True, 
+        vertical_spacing=0.05,
+        subplot_titles=subplot_titles
+    )
     
     # Expanded color palette (10 colors) to handle multiple c_inter values
     colors = [
@@ -341,7 +350,7 @@ def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neig
                         name=f"c={c_label}",
                         legendgroup=f"c_{c_label}", 
                         showlegend=False, visible=is_visible
-                    ))
+                ), row=k+1, col=1)
                     traces_dict[(m_idx, n_idx)].append(total_traces)
                     total_traces += 1
 
@@ -354,7 +363,7 @@ def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neig
                         name=f"c={c_label}",
                         legendgroup=f"c_{c_label}",
                         showlegend=(j == 0), hoverinfo='x+y+name', visible=is_visible
-                    ))
+                ), row=k+1, col=1)
                     traces_dict[(m_idx, n_idx)].append(total_traces)
                     total_traces += 1
 
@@ -376,7 +385,7 @@ def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neig
                 method="update",
                 args=[
                     {"visible": step_visibility},
-                    {"title": f"c_inter sweep for μ = {mu}, dist = {np.round(n, 3)}"}
+                    {"title": f"Data for μ = {mu}, dist = {np.round(n, 3)}"}
                 ],
                 label=str(np.round(n, 3))
             ))
@@ -400,7 +409,7 @@ def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neig
                 {"visible": btn_visibility},
                 {
                     "sliders": [sliders_all[m_idx]],
-                    "title": f"c_inter sweep for μ = {mu}, dist = {np.round(neigh_to_plot[0], 3)}"
+                "title": f"Data for μ = {mu}, dist = {np.round(neigh_to_plot[0], 3)}"
                 }
             ]
         ))
@@ -410,11 +419,9 @@ def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neig
 
     fig.update_layout(
         title=dict(
-            text=f"c_inter sweep for μ = {mu_values[0]}, dist = {np.round(neigh_to_plot[0], 3)}",
+            text=f"Data for μ = {mu_values[0]}, dist = {np.round(neigh_to_plot[0], 3)}",
             y=0.98, x=0.5, xanchor='center', yanchor='top'
         ),
-        xaxis_title="Zeeman splitting (b) [eV]",
-        yaxis_title=clean_y_title,
         template="plotly_white",
         hovermode="closest",
         margin=dict(t=120),  # Top margin to prevent squishing
@@ -428,15 +435,82 @@ def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neig
             y=1.20, yanchor="top"
         )],
         legend=dict(title="c_inter values", yanchor="top", y=1, xanchor="left", x=1.05),
-        width=950, height=700
+        width=950, height=max(700, 200 * num_c)
     )
 
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+    for k in range(num_c):
+        fig.update_yaxes(title_text=clean_y_title, showgrid=True, gridwidth=1, gridcolor='LightGray', row=k+1, col=1)
+        if k == num_c - 1:
+            fig.update_xaxes(title_text="Zeeman splitting (b) [eV]", showgrid=True, gridwidth=1, gridcolor='LightGray', row=k+1, col=1)
+        else:
+            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray', row=k+1, col=1)
     
     fig.add_annotation(
         text="Chemical Potential:",
         x=0.01, y=1.27, xref="paper", yref="paper", showarrow=False, xanchor="left"
     )
 
+    fig.show()
+
+def plot_heatmap_mu_cinter(save_dir, mu_values, quantity='J_iso_meV', b_val_target=0.0, num_neighbors=1):
+    """
+    Plots a heatmap of the selected quantity (e.g., J_iso_meV) as a function of mu (x-axis) 
+    and c_inter (y-axis) for a specific b_val and distance.
+    """
+    all_data, unique_c, unique_b, unique_neigh = preload_data(save_dir, mu_values, quantity, num_neighbors=num_neighbors)
+    
+    if not all_data:
+        print("No data found!")
+        return
+        
+    # Find closest b_val index
+    b_idx = np.argmin(np.abs(unique_b - b_val_target))
+    actual_b = unique_b[b_idx]
+    
+    # We will plot the first distance (index 0)
+    target_dist_val = unique_neigh[0]
+    
+    # Initialize the 2D array for the heatmap (rows: c_inter, cols: mu)
+    Z = np.zeros((len(unique_c), len(mu_values)))
+    
+    for j, mu in enumerate(mu_values):
+        if mu not in all_data:
+            Z[:, j] = np.nan
+            continue
+            
+        y_data = all_data[mu]['y_data']
+        distances = all_data[mu]['distances']
+        rounded_dist = np.round(distances, 4)
+        
+        dist_indices = np.where(np.isclose(rounded_dist, target_dist_val))[0]
+        
+        if len(dist_indices) == 0:
+            Z[:, j] = np.nan
+            continue
+            
+        d_idx = dist_indices[0] # Take the first matching distance index
+        
+        N = len(unique_b)
+        for k in range(len(unique_c)):
+            row_idx = N * k + b_idx
+            Z[k, j] = y_data[row_idx, d_idx]
+            
+    fig = go.Figure(data=go.Heatmap(
+        z=Z,
+        x=mu_values,
+        y=unique_c,
+        colorscale='RdBu_r',
+        colorbar=dict(title=f"{quantity} [meV]")
+    ))
+    
+    clean_y_title = "J_iso [meV]" if quantity == "J_iso_meV" else "D [meV]"
+    fig.update_layout(
+        title=f"{clean_y_title} as a function of μ and c_inter<br><sup>(b ≈ {actual_b:.4f}, dist ≈ {target_dist_val:.4f})</sup>",
+        xaxis_title="Chemical Potential (μ) [eV]",
+        yaxis_title="c_inter [eV]",
+        width=800,
+        height=600,
+        template="plotly_white"
+    )
+    
     fig.show()
