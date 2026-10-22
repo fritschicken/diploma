@@ -1,3 +1,16 @@
 numpy
 scipy
 sisl
+plotly
+matplotlib
+ipywidgets
+
+[analysis]
+grogupy
+z2pack
+mpi4py
+tqdm
+dill
+pandas
+seaborn
+scikit-learn

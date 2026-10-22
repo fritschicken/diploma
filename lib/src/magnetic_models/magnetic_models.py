@@ -117,7 +117,6 @@ class TopologicalInsulatorModel:
         self.Ny: Optional[int] = None
         self.a: Optional[float] = None
         self.z: Optional[float] = None
-        
         self.geom: Optional[si.Geometry] = None
         self.H: Optional[si.Hamiltonian] = None
         self.DM: Optional[si.DensityMatrix] = None
@@ -189,7 +188,6 @@ class TopologicalInsulatorModel:
         # Default boundary conditions
         if abc is None:
             abc = [5, 2, 5]
-
         # Calculate number of supercells (nsc) for sisl based on BCs
         # If code is 2 (Dirichlet/Custom), use 3 supercells, otherwise 1
         nsc = [3 if code == 2 else 1 for code in abc]
@@ -636,7 +634,7 @@ class TopologicalInsulatorModel:
 
         # 4. Build Hamiltonian & DM
         H = self.build_hamiltonian()
-        DM = self.build_density_matrix(kT=kT, mu=mu_chem)
+        DM = self.build_density_matrix(kT=kT, fermi_level=mu_chem)
         
         return H, DM
  

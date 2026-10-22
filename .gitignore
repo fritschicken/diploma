@@ -1,19 +1,23 @@
-# 1. Ignore EVERYTHING in the root directory
+# Whitelist: ignore everything in the root, then allow only what is published.
+# Notebooks, scripts, figures and raw results (results/, param_space/, gap/, ...)
+# stay local.
 /*
 
-# 2. Allow only the essential configuration files in the root
 !/.gitignore
-!/pyproject.toml
 !/README.md
-
-# 3. Allow the ENTIRE lib folder and everything inside it
+!/diploma.pdf
+!/ppt.pdf
 !/lib/
-!/lib/**
 
-# 4. Explicitly block the build junk inside lib (to keep it clean)
+# Build and packaging artifacts
 /lib/build/
-/lib/*.egg-info/
+/lib/dist/
+**/*.egg-info/
 
-# 5. Global cleanup
+# Python caches
 **/__pycache__/
-**/*.pyc
+**/*.py[cod]
+
+# OS / editor junk
+**/.DS_Store
+**/.ipynb_checkpoints/

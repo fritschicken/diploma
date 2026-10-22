@@ -1,7 +1,9 @@
+LICENSE
 README.md
 pyproject.toml
 src/magnetic_models/__init__.py
 src/magnetic_models/magnetic_models.py
+src/magnetic_models/utils.py
 src/magnetic_models.egg-info/PKG-INFO
 src/magnetic_models.egg-info/SOURCES.txt
 src/magnetic_models.egg-info/dependency_links.txt
