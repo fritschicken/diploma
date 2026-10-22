@@ -1,516 +1,367 @@
+"""
+Post-processing and plotting of exchange-interaction sweeps.
+
+A sweep is a set of ``data_mu_{mu}.npz`` files in one directory, one file per
+chemical potential. Each file holds a full (c_inter, b) grid, row-major in
+c_inter, with arrays:
+
+- ``c_inter``, ``b_val``     : (n_rows,) parameter values of each row
+- ``distances``              : (n_rows, n_pairs) pair distances (same in every row)
+- ``J_iso_meV``, ``D_meV``   : (n_rows, n_pairs[, 3]) computed quantities
+"""
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+import ipywidgets as widgets
+import matplotlib.pyplot as plt
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.interpolate import PchipInterpolator
 
-import matplotlib.pyplot as plt
-import ipywidgets as widgets
-from ipywidgets import interact
+__all__ = [
+    "Sweep",
+    "load_sweep",
+    "interactive_dual_heatmap",
+    "plot_interactive_mu_c",
+    "plot_interactive_mu_dist",
+    "plot_heatmap_mu_cinter",
+]
 
-def preload_data(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=5):
-    """Loads all files into memory once so the sliders update instantly."""
-    all_data = {}
-    unique_c, unique_b, unique_neigh = None, None, None
-    
-    print("Pre-loading data into memory...")
+QUANTITY_LABELS = {"J_iso_meV": "J_iso [meV]", "D_meV": "D [meV]"}
+B_LABEL = "Zeeman splitting (b) [eV]"
+COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+]
+GRID_STYLE = dict(showgrid=True, gridwidth=1, gridcolor="LightGray")
+
+# Rounding used to compare floating-point parameters and distances
+PARAM_DECIMALS = 5
+DIST_DECIMALS = 4
+
+
+# -----------------------------------------------------------------------------
+# Loading
+# -----------------------------------------------------------------------------
+@dataclass
+class Sweep:
+    """
+    A (mu, c_inter, b) sweep of one quantity.
+
+    Attributes
+    ----------
+    quantity : str
+        Name of the loaded array, e.g. 'J_iso_meV'.
+    c_inter, b : np.ndarray
+        Sorted grid axes.
+    distances : np.ndarray
+        Distance of every pair, shape (n_pairs,).
+    data : dict
+        Maps each loaded mu to an array of shape (n_c, n_b, n_pairs).
+    """
+    quantity: str
+    c_inter: np.ndarray
+    b: np.ndarray
+    distances: np.ndarray
+    data: Dict[float, np.ndarray] = field(default_factory=dict)
+
+    @property
+    def mu_values(self) -> List[float]:
+        return list(self.data)
+
+    @property
+    def label(self) -> str:
+        return QUANTITY_LABELS.get(self.quantity, self.quantity)
+
+    def shells(self, num_neighbors: Optional[int] = None) -> np.ndarray:
+        """Distinct neighbour distances, nearest first."""
+        return np.unique(np.round(self.distances, DIST_DECIMALS))[:num_neighbors]
+
+    def pairs_at(self, shell: float) -> np.ndarray:
+        """Indices of the pairs whose distance equals `shell`."""
+        return np.flatnonzero(np.isclose(np.round(self.distances, DIST_DECIMALS), shell))
+
+
+def load_sweep(save_dir: str, mu_values, quantity: str = "J_iso_meV") -> Sweep:
+    """
+    Loads ``data_mu_{mu}.npz`` for every mu in `mu_values` from `save_dir`.
+
+    Missing files are skipped with a warning. Raises if no file is found, if a
+    file does not contain a full (c_inter, b) grid, or if the grids differ
+    between files.
+    """
+    sweep = None
     for mu in mu_values:
-        file_path = os.path.join(save_dir, f"data_mu_{mu}.npz")
-        if not os.path.exists(file_path):
+        path = os.path.join(save_dir, f"data_mu_{mu}.npz")
+        if not os.path.exists(path):
+            print(f"Warning: {path} not found, skipping mu={mu}.")
             continue
-            
-        data = np.load(file_path)
-        all_data[mu] = {
-            'y_data': data[quantity],
-            'distances': data['distances'][0]
-        }
-        
-        # Grab the axes from the first valid file
-        if unique_c is None:
-            unique_c = np.unique(np.round(data['c_inter'], 5))
-            unique_b = np.unique(np.round(data['b_val'], 5))
-            rounded_dist = np.round(data['distances'][0], 4)
-            unique_neigh = np.unique(rounded_dist)[:num_neighbors]
-            
-    return all_data, unique_c, unique_b, unique_neigh
+
+        with np.load(path) as f:
+            c = np.round(f["c_inter"], PARAM_DECIMALS)
+            b = np.round(f["b_val"], PARAM_DECIMALS)
+            values = f[quantity]
+            distances = f["distances"][0]
+
+        c_axis, b_axis = np.unique(c), np.unique(b)
+        n_c, n_b = len(c_axis), len(b_axis)
+        if not (
+            len(c) == n_c * n_b
+            and np.array_equal(c, np.repeat(c_axis, n_b))
+            and np.array_equal(b, np.tile(b_axis, n_c))
+        ):
+            raise ValueError(f"{path} does not contain a full (c_inter, b) grid.")
+
+        if sweep is None:
+            sweep = Sweep(quantity, c_axis, b_axis, distances)
+        elif not (np.array_equal(c_axis, sweep.c_inter) and np.array_equal(b_axis, sweep.b)):
+            raise ValueError(f"{path} uses a different (c_inter, b) grid than the other files.")
+
+        sweep.data[mu] = values.reshape(n_c, n_b, *values.shape[1:])
+
+    if sweep is None:
+        raise FileNotFoundError(f"No data_mu_*.npz files found in {save_dir} for mu={list(mu_values)}.")
+    if next(iter(sweep.data.values())).ndim != 3:
+        raise ValueError(f"'{quantity}' is not a scalar per pair; the plots need one value per pair.")
+    return sweep
 
 
-def interactive_dual_heatmap(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=5):
-    # 1. Pre-load everything
-    all_data, unique_c, unique_b, unique_neigh = preload_data(save_dir, mu_values, quantity, num_neighbors)
-    
-    if not all_data:
-        print("No data found! Check your directory path and mu values.")
-        return
-        
-    B, C = np.meshgrid(unique_b, unique_c)
-    
-    # 2. Define the plot function that gets called when a slider moves
-    def plot_heatmaps(mu, target_distance):
-        if mu not in all_data:
-            print(f"No data loaded for mu={mu}")
-            return
-            
-        y_data = all_data[mu]['y_data']
-        distances = all_data[mu]['distances']
-        rounded_dist = np.round(distances, 4)
-        
-        # Snap to closest distance
-        closest_dist = unique_neigh[np.argmin(np.abs(unique_neigh - target_distance))]
-        indices = np.where(np.isclose(rounded_dist, closest_dist))[0]
-        
-        # Calculate Mean and Difference
-        y_slice = y_data[:, indices]
-        y_mean_flat = np.mean(y_slice, axis=1)
-        y_diff_flat = np.ptp(y_slice, axis=1) # ptp is Peak-to-Peak (Max - Min)
-        
-        Z_mean = y_mean_flat.reshape(len(unique_c), len(unique_b))
-        Z_diff = y_diff_flat.reshape(len(unique_c), len(unique_b))
-        
-        # Create the figure
+# -----------------------------------------------------------------------------
+# Plotly helpers
+# -----------------------------------------------------------------------------
+def _add_curve(fig, x, y, color, name, showlegend, visible, **subplot):
+    """Adds the data points and a PCHIP interpolation line through them."""
+    xs = np.linspace(x.min(), x.max(), 400)
+    fig.add_trace(go.Scatter(
+        x=x, y=y, mode="markers",
+        marker=dict(symbol="diamond", size=8, color=color),
+        name=name, legendgroup=name, showlegend=False, visible=visible,
+    ), **subplot)
+    fig.add_trace(go.Scatter(
+        x=xs, y=PchipInterpolator(x, y)(xs), mode="lines",
+        line=dict(color=color, width=2),
+        name=name, legendgroup=name, showlegend=showlegend,
+        hoverinfo="x+y+name", visible=visible,
+    ), **subplot)
+
+
+def _add_mu_controls(fig, groups, mu_values, slider_labels, slider_prefix, title):
+    """
+    Adds a mu dropdown and, for each mu, a slider over `slider_labels`.
+
+    `groups[m][s]` lists the trace indices shown for mu index m at slider step s.
+    `title(mu, label)` gives the figure title for each state.
+    """
+    n_traces = len(fig.data)
+
+    def visibility(trace_ids):
+        mask = [False] * n_traces
+        for i in trace_ids:
+            mask[i] = True
+        return mask
+
+    sliders = []
+    buttons = []
+    for m, mu in enumerate(mu_values):
+        steps = [
+            dict(
+                method="update",
+                args=[{"visible": visibility(groups[m][s])}, {"title": title(mu, label)}],
+                label=label,
+            )
+            for s, label in enumerate(slider_labels)
+        ]
+        sliders.append(dict(
+            active=0, currentvalue={"prefix": f"{slider_prefix} (μ={mu}): "},
+            pad={"t": 50}, steps=steps,
+        ))
+        buttons.append(dict(
+            label=f"μ = {mu}",
+            method="update",
+            args=[
+                {"visible": visibility(groups[m][0])},
+                {"sliders": [sliders[m]], "title": title(mu, slider_labels[0])},
+            ],
+        ))
+
+    fig.update_layout(
+        title=dict(text=title(mu_values[0], slider_labels[0]), x=0.5, xanchor="center"),
+        template="plotly_white",
+        hovermode="closest",
+        margin=dict(t=120),
+        sliders=[sliders[0]],
+        updatemenus=[dict(
+            buttons=buttons, direction="down", pad={"r": 10, "t": 10}, showactive=True,
+            x=0.01, xanchor="left", y=1.20, yanchor="top",
+        )],
+    )
+    fig.add_annotation(
+        text="Chemical Potential:", x=0.01, y=1.27,
+        xref="paper", yref="paper", showarrow=False, xanchor="left",
+    )
+
+
+# -----------------------------------------------------------------------------
+# Plots
+# -----------------------------------------------------------------------------
+def interactive_dual_heatmap(save_dir, mu_values, quantity="J_iso_meV", num_neighbors=5):
+    """
+    Two (b, c_inter) heatmaps with widgets for mu and neighbour distance: the mean
+    of `quantity` over all pairs at that distance, and its spread (max - min),
+    which shows how much the pairs' symmetry is broken.
+    """
+    sweep = load_sweep(save_dir, mu_values, quantity)
+    shells = sweep.shells(num_neighbors)
+    B, C = np.meshgrid(sweep.b, sweep.c_inter)
+
+    def plot(mu, shell):
+        values = sweep.data[mu][:, :, sweep.pairs_at(shell)]
+        mean = values.mean(axis=2)
+        spread = np.ptp(values, axis=2)
+        subtitle = rf"$\mu$ = {mu}, dist $\approx$ {shell:.3f}"
+
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-        
-        # --- Left Plot: Mean ---
-        vmax = np.max(np.abs(Z_mean))
-        if vmax == 0: vmax = 1e-6 # Prevent division by zero errors if data is flat
-        vmin = -vmax #if np.min(Z_mean) < 0 else 0 
-        
-        cp1 = ax1.pcolormesh(B, C, Z_mean, shading='auto', cmap='RdBu_r', vmin=vmin, vmax=vmax)
-        #ax1.contour(B,C,Z_mean,colors='k',levels =10)
-        cbar1 = fig.colorbar(cp1, ax=ax1)
-        cbar1.set_label(f"Mean {quantity} [meV]")
-        
-        ax1.set_title("Mean Interaction Strength\n"+r"$\mu$"+f" = {mu}, Dist $\\approx$ {closest_dist:.3f}")
-        ax1.set_xlabel("Zeeman splitting (b) [eV]")
-        ax1.set_ylabel("$c_{inter}$ [eV]")
-        
-        # --- Right Plot: Spread ---
-        cp2 = ax2.pcolormesh(B, C, Z_diff, shading='auto', cmap='viridis')
-        cbar2 = fig.colorbar(cp2, ax=ax2)
-        cbar2.set_label("Max Difference (Spread) [meV]")
-        
-        ax2.set_title(f"Symmetry Breaking (Max - Min)\n"r"$\mu$ = "+f"{mu}"+f", Dist $\\approx$ {closest_dist:.3f}")
-        ax2.set_xlabel("Zeeman splitting (b) [eV]")
-        ax2.set_ylabel("$c_{inter}$ [eV]")
-        
-        plt.tight_layout()
-        plt.show()
-        
+
+        vmax = np.max(np.abs(mean)) or 1e-6
+        cp1 = ax1.pcolormesh(B, C, mean, shading="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+        fig.colorbar(cp1, ax=ax1).set_label(f"Mean {sweep.label}")
+        ax1.set_title(f"Mean interaction strength\n{subtitle}")
+
+        cp2 = ax2.pcolormesh(B, C, spread, shading="auto", cmap="viridis")
+        fig.colorbar(cp2, ax=ax2).set_label("Spread (max - min) [meV]")
+        ax2.set_title(f"Symmetry breaking (max - min)\n{subtitle}")
+
+        for ax in (ax1, ax2):
+            ax.set_xlabel(B_LABEL)
+            ax.set_ylabel("$c_{inter}$ [eV]")
+
+        fig.tight_layout()
         plt.show()
 
-    # 3. Create the UI Sliders
-    # SelectionSlider is used because your neighbor distances are specific, discrete numbers
-    mu_slider = widgets.SelectionSlider(options=list(all_data.keys()), description=r'$\mu$:')
-    dist_slider = widgets.SelectionSlider(options=list(unique_neigh), description='Distance:')
-    
-    # 4. Link the UI to the plot
-    interact(plot_heatmaps, mu=mu_slider, target_distance=dist_slider)
+    widgets.interact(
+        plot,
+        mu=widgets.SelectionSlider(options=sweep.mu_values, description=r"$\mu$:"),
+        shell=widgets.SelectionSlider(options=[float(s) for s in shells], description="Distance:"),
+    )
 
-def plot_interactive_mu_c(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=3):
-    all_data = {}
-    unique_c = None
-    unique_b = None
-    dist_vector = None
-    
-    print("Loading data...")
-    # --- 1. Load All Data ---
-    for mu in mu_values:
-        file_path = os.path.join(save_dir, f"data_mu_{mu}.npz")
-        if not os.path.exists(file_path):
-            print(f"Warning: File {file_path} not found. Skipping mu={mu}.")
-            continue
-            
-        data = np.load(file_path)
-        all_data[mu] = {
-            'c_inter': data['c_inter'],
-            'b_val': data['b_val'],
-            'y_data': data[quantity],
-            'distances': data['distances']
-        }
-        
-        if unique_c is None:
-            unique_c = np.unique(np.round(all_data[mu]['c_inter'], 5))
-            unique_b = np.unique(np.round(all_data[mu]['b_val'], 5))
-            dist_vector = all_data[mu]['distances'][0]
-            rounded_dist = np.round(dist_vector, 4)
-            unique_neigh = np.unique(rounded_dist)
-            neigh_to_plot = unique_neigh[:num_neighbors]
 
-    if not all_data:
-        print("No data loaded. Please check your save_dir and mu_values.")
-        return
-
+def plot_interactive_mu_c(save_dir, mu_values, quantity="J_iso_meV", num_neighbors=3):
+    """
+    `quantity` against b for every pair, coloured by neighbour distance.
+    A dropdown picks mu and a slider picks c_inter.
+    """
+    sweep = load_sweep(save_dir, mu_values, quantity)
+    shells = sweep.shells(num_neighbors)
     fig = go.Figure()
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
-    
-    traces_dict = {}
-    total_traces = 0
-    N = len(unique_b)
 
-    # --- 2. Build All Traces ---
-    for m_idx, mu in enumerate(mu_values):
-        if mu not in all_data: continue
-        
-        for k, c_val in enumerate(unique_c):
-            traces_dict[(m_idx, k)] = []
-            is_visible = (m_idx == 0 and k == 0) 
-            
-            for n_idx, n in enumerate(neigh_to_plot):
-                color = colors[n_idx % len(colors)]
-                indices = np.where(np.isclose(rounded_dist, n))[0]
-                
-                for j, i in enumerate(indices):
-                    y_slice = all_data[mu]['y_data'][N*k : N*(k+1), i]
-                    
-                    # Scatter Points
-                    fig.add_trace(go.Scatter(
-                        x=unique_b, y=y_slice, mode='markers',
-                        marker=dict(symbol='diamond', size=8, color=color),
-                        name=f"dist={np.round(n,2)}",
-                        legendgroup=f"dist_{np.round(n,2)}", 
-                        showlegend=False, visible=is_visible
-                    ))
-                    traces_dict[(m_idx, k)].append(total_traces)
-                    total_traces += 1
+    groups = []
+    for m, mu in enumerate(sweep.mu_values):
+        groups.append([])
+        for k in range(len(sweep.c_inter)):
+            start = len(fig.data)
+            visible = m == 0 and k == 0
+            for n, shell in enumerate(shells):
+                for j, pair in enumerate(sweep.pairs_at(shell)):
+                    _add_curve(
+                        fig, sweep.b, sweep.data[mu][k, :, pair],
+                        color=COLORS[n % len(COLORS)], name=f"dist={shell:.2f}",
+                        showlegend=j == 0, visible=visible,
+                    )
+            groups[m].append(range(start, len(fig.data)))
 
-                    # Interpolated Line
-                    xs = np.linspace(unique_b.min(), unique_b.max(), 400)
-                    cs = PchipInterpolator(unique_b, y_slice)
-                    fig.add_trace(go.Scatter(
-                        x=xs, y=cs(xs), mode='lines',
-                        line=dict(color=color, width=2),
-                        name=f"dist={np.round(n,2)}",
-                        legendgroup=f"dist_{np.round(n,2)}",
-                        showlegend=(j == 0), hoverinfo='x+y+name', visible=is_visible
-                    ))
-                    traces_dict[(m_idx, k)].append(total_traces)
-                    total_traces += 1
-
-    # --- 3. Build UI Controls ---
-    sliders_all = []
-    dropdown_buttons = []
-
-    for m_idx, mu in enumerate(mu_values):
-        if mu not in all_data: continue
-        
-        steps = []
-        for k, c_val in enumerate(unique_c):
-            step_visibility = [False] * total_traces
-            for trace_idx in traces_dict[(m_idx, k)]:
-                step_visibility[trace_idx] = True
-                
-            steps.append(dict(
-                method="update",
-                args=[
-                    {"visible": step_visibility},
-                    {"title": f"Neighbors for μ = {mu}, c_inter = {np.round(c_val, 3)}"}
-                ],
-                label=str(np.round(c_val, 3))
-            ))
-            
-        sliders_all.append(dict(
-            active=0,
-            currentvalue={"prefix": f"c_inter (μ={mu}): "},
-            pad={"t": 50},
-            steps=steps
-        ))
-
-        btn_visibility = [False] * total_traces
-        for trace_idx in traces_dict[(m_idx, 0)]:
-            btn_visibility[trace_idx] = True
-            
-        dropdown_buttons.append(dict(
-            label=f"μ = {mu}",
-            method="update",
-            args=[
-                {"visible": btn_visibility},
-                {
-                    "sliders": [sliders_all[m_idx]]
-                }
-            ]
-        ))
-
-    # --- 4. Layout Styling ---
-    # Cleaned up the quantity string to prevent broken LaTeX formatting
-    clean_y_title = "J_iso [meV]" if quantity == "J_iso_meV" else "D [meV]"
-
+    _add_mu_controls(
+        fig, groups, sweep.mu_values,
+        slider_labels=[f"{c:.3f}" for c in sweep.c_inter],
+        slider_prefix="c_inter",
+        title=lambda mu, c: f"Neighbours for μ = {mu}, c_inter = {c}",
+    )
     fig.update_layout(
-        xaxis_title="Zeeman splitting (b) [eV]",
-        yaxis_title=clean_y_title,
-        template="plotly_white",
-        hovermode="closest",
-        margin=dict(t=120),  # Added generous top margin for the UI controls
-        sliders=[sliders_all[0]], 
-        updatemenus=[dict(
-            buttons=dropdown_buttons,
-            direction="down",
-            pad={"r": 10, "t": 10},
-            showactive=True,
-            x=0.01, xanchor="left",
-            y=1.20, yanchor="top" # Lifted the dropdown way above the title
-        )],
+        xaxis_title=B_LABEL, yaxis_title=sweep.label,
         legend=dict(title="Distances", yanchor="top", y=1, xanchor="left", x=1.05),
-        width=950, height=700
+        width=950, height=700,
     )
-
-    # Removed the fixed y-axis so Plotly auto-scales properly per slider/dropdown step
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-    
-    fig.add_annotation(
-        text="Chemical Potential:",
-        x=0.01, y=1.27, xref="paper", yref="paper", showarrow=False, xanchor="left" # Shifted annotation to match new dropdown position
-    )
-
+    fig.update_xaxes(**GRID_STYLE)
+    fig.update_yaxes(**GRID_STYLE)
     fig.show()
+    return fig
 
 
-def plot_interactive_mu_dist(save_dir, mu_values, quantity='J_iso_meV', num_neighbors=5):
+def plot_interactive_mu_dist(save_dir, mu_values, quantity="J_iso_meV", num_neighbors=5):
     """
-    Plots interactive data where the dropdown controls μ (Chemical Potential),
-    the slider controls Neighbor Distance, and lines are colored by c_inter.
+    `quantity` against b, with one subplot per c_inter.
+    A dropdown picks mu and a slider picks the neighbour distance.
     """
-    all_data = {}
-    unique_c = None
-    unique_b = None
-    dist_vector = None
-    
-    print("Loading data...")
-    # --- 1. Load All Data ---
-    for mu in mu_values:
-        file_path = os.path.join(save_dir, f"data_mu_{mu}.npz")
-        if not os.path.exists(file_path):
-            print(f"Warning: File {file_path} not found. Skipping mu={mu}.")
-            continue
-            
-        data = np.load(file_path)
-        all_data[mu] = {
-            'c_inter': data['c_inter'],
-            'b_val': data['b_val'],
-            'y_data': data[quantity],
-            'distances': data['distances']
-        }
-        
-        # Extract unique axes and neighbor distances from the first valid file
-        if unique_c is None:
-            unique_c = np.unique(np.round(all_data[mu]['c_inter'], 5))
-            unique_b = np.unique(np.round(all_data[mu]['b_val'], 5))
-            dist_vector = all_data[mu]['distances'][0]
-            rounded_dist = np.round(dist_vector, 4)
-            unique_neigh = np.unique(rounded_dist)
-            neigh_to_plot = unique_neigh[:num_neighbors]
-
-    if not all_data:
-        print("No data loaded. Please check your save_dir and mu_values.")
-        return
-
-    num_c = len(unique_c)
-    subplot_titles = [f"c_inter = {np.round(c, 3)}" for c in unique_c]
+    sweep = load_sweep(save_dir, mu_values, quantity)
+    shells = sweep.shells(num_neighbors)
+    num_c = len(sweep.c_inter)
     fig = make_subplots(
-        rows=num_c, 
-        cols=1, 
-        shared_xaxes=True, 
-        vertical_spacing=0.05,
-        subplot_titles=subplot_titles
+        rows=num_c, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+        subplot_titles=[f"c_inter = {c:.3f}" for c in sweep.c_inter],
     )
-    
-    # Expanded color palette (10 colors) to handle multiple c_inter values
-    colors = [
-        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
-        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
-    ]
-    
-    traces_dict = {}
-    total_traces = 0
-    N = len(unique_b)
 
-    # --- 2. Build All Traces (Hierarchy swapped!) ---
-    for m_idx, mu in enumerate(mu_values):
-        if mu not in all_data: continue
-        
-        # Loop through neighbor distances for the slider
-        for n_idx, n in enumerate(neigh_to_plot):
-            traces_dict[(m_idx, n_idx)] = []
-            is_visible = (m_idx == 0 and n_idx == 0) # Only first combo visible
-            
-            indices = np.where(np.isclose(rounded_dist, n))[0]
-            
-            # Loop through c_inter values for the lines/colors
-            for k, c_val in enumerate(unique_c):
-                color = colors[k % len(colors)]
-                c_label = np.round(c_val, 3)
-                
-                for j, i in enumerate(indices):
-                    y_slice = all_data[mu]['y_data'][N*k : N*(k+1), i]
-                    
-                    # Scatter Points
-                    fig.add_trace(go.Scatter(
-                        x=unique_b, y=y_slice, mode='markers',
-                        marker=dict(symbol='diamond', size=8, color=color),
-                        name=f"c={c_label}",
-                        legendgroup=f"c_{c_label}", 
-                        showlegend=False, visible=is_visible
-                ), row=k+1, col=1)
-                    traces_dict[(m_idx, n_idx)].append(total_traces)
-                    total_traces += 1
+    groups = []
+    for m, mu in enumerate(sweep.mu_values):
+        groups.append([])
+        for n, shell in enumerate(shells):
+            start = len(fig.data)
+            visible = m == 0 and n == 0
+            pairs = sweep.pairs_at(shell)
+            for k, c in enumerate(sweep.c_inter):
+                for j, pair in enumerate(pairs):
+                    _add_curve(
+                        fig, sweep.b, sweep.data[mu][k, :, pair],
+                        color=COLORS[k % len(COLORS)], name=f"c={c:.3f}",
+                        showlegend=j == 0, visible=visible, row=k + 1, col=1,
+                    )
+            groups[m].append(range(start, len(fig.data)))
 
-                    # Interpolated Line
-                    xs = np.linspace(unique_b.min(), unique_b.max(), 400)
-                    cs = PchipInterpolator(unique_b, y_slice)
-                    fig.add_trace(go.Scatter(
-                        x=xs, y=cs(xs), mode='lines',
-                        line=dict(color=color, width=2),
-                        name=f"c={c_label}",
-                        legendgroup=f"c_{c_label}",
-                        showlegend=(j == 0), hoverinfo='x+y+name', visible=is_visible
-                ), row=k+1, col=1)
-                    traces_dict[(m_idx, n_idx)].append(total_traces)
-                    total_traces += 1
-
-    # --- 3. Build UI Controls ---
-    sliders_all = []
-    dropdown_buttons = []
-
-    for m_idx, mu in enumerate(mu_values):
-        if mu not in all_data: continue
-        
-        # Slider steps (now based on neighbor distances)
-        steps = []
-        for n_idx, n in enumerate(neigh_to_plot):
-            step_visibility = [False] * total_traces
-            for trace_idx in traces_dict[(m_idx, n_idx)]:
-                step_visibility[trace_idx] = True
-                
-            steps.append(dict(
-                method="update",
-                args=[
-                    {"visible": step_visibility},
-                    {"title": f"Data for μ = {mu}, dist = {np.round(n, 3)}"}
-                ],
-                label=str(np.round(n, 3))
-            ))
-            
-        sliders_all.append(dict(
-            active=0,
-            currentvalue={"prefix": f"Dist (μ={mu}): "},
-            pad={"t": 50},
-            steps=steps
-        ))
-
-        # Dropdown logic
-        btn_visibility = [False] * total_traces
-        for trace_idx in traces_dict[(m_idx, 0)]:
-            btn_visibility[trace_idx] = True
-            
-        dropdown_buttons.append(dict(
-            label=f"μ = {mu}",
-            method="update",
-            args=[
-                {"visible": btn_visibility},
-                {
-                    "sliders": [sliders_all[m_idx]],
-                "title": f"Data for μ = {mu}, dist = {np.round(neigh_to_plot[0], 3)}"
-                }
-            ]
-        ))
-
-    # --- 4. Layout Styling ---
-    clean_y_title = "J_iso [meV]" if quantity == "J_iso_meV" else "D [meV]"
-
+    _add_mu_controls(
+        fig, groups, sweep.mu_values,
+        slider_labels=[f"{d:.3f}" for d in shells],
+        slider_prefix="Dist",
+        title=lambda mu, d: f"Data for μ = {mu}, dist = {d}",
+    )
     fig.update_layout(
-        title=dict(
-            text=f"Data for μ = {mu_values[0]}, dist = {np.round(neigh_to_plot[0], 3)}",
-            y=0.98, x=0.5, xanchor='center', yanchor='top'
-        ),
-        template="plotly_white",
-        hovermode="closest",
-        margin=dict(t=120),  # Top margin to prevent squishing
-        sliders=[sliders_all[0]], 
-        updatemenus=[dict(
-            buttons=dropdown_buttons,
-            direction="down",
-            pad={"r": 10, "t": 10},
-            showactive=True,
-            x=0.01, xanchor="left",
-            y=1.20, yanchor="top"
-        )],
         legend=dict(title="c_inter values", yanchor="top", y=1, xanchor="left", x=1.05),
-        width=950, height=max(700, 200 * num_c)
+        width=950, height=max(700, 200 * num_c),
     )
-
-    for k in range(num_c):
-        fig.update_yaxes(title_text=clean_y_title, showgrid=True, gridwidth=1, gridcolor='LightGray', row=k+1, col=1)
-        if k == num_c - 1:
-            fig.update_xaxes(title_text="Zeeman splitting (b) [eV]", showgrid=True, gridwidth=1, gridcolor='LightGray', row=k+1, col=1)
-        else:
-            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray', row=k+1, col=1)
-    
-    fig.add_annotation(
-        text="Chemical Potential:",
-        x=0.01, y=1.27, xref="paper", yref="paper", showarrow=False, xanchor="left"
-    )
-
+    fig.update_yaxes(title_text=sweep.label, **GRID_STYLE)
+    fig.update_xaxes(**GRID_STYLE)
+    fig.update_xaxes(title_text=B_LABEL, row=num_c, col=1)
     fig.show()
+    return fig
 
-def plot_heatmap_mu_cinter(save_dir, mu_values, quantity='J_iso_meV', b_val_target=0.0, num_neighbors=1):
+
+def plot_heatmap_mu_cinter(save_dir, mu_values, quantity="J_iso_meV", b_val_target=0.0):
     """
-    Plots a heatmap of the selected quantity (e.g., J_iso_meV) as a function of mu (x-axis) 
-    and c_inter (y-axis) for a specific b_val and distance.
+    Heatmap of `quantity` over mu (x) and c_inter (y), for the b closest to
+    `b_val_target` and the first pair at the nearest-neighbour distance.
     """
-    all_data, unique_c, unique_b, unique_neigh = preload_data(save_dir, mu_values, quantity, num_neighbors=num_neighbors)
-    
-    if not all_data:
-        print("No data found!")
-        return
-        
-    # Find closest b_val index
-    b_idx = np.argmin(np.abs(unique_b - b_val_target))
-    actual_b = unique_b[b_idx]
-    
-    # We will plot the first distance (index 0)
-    target_dist_val = unique_neigh[0]
-    
-    # Initialize the 2D array for the heatmap (rows: c_inter, cols: mu)
-    Z = np.zeros((len(unique_c), len(mu_values)))
-    
+    sweep = load_sweep(save_dir, mu_values, quantity)
+    b_idx = np.argmin(np.abs(sweep.b - b_val_target))
+    shell = sweep.shells(1)[0]
+    pair = sweep.pairs_at(shell)[0]
+
+    Z = np.full((len(sweep.c_inter), len(mu_values)), np.nan)
     for j, mu in enumerate(mu_values):
-        if mu not in all_data:
-            Z[:, j] = np.nan
-            continue
-            
-        y_data = all_data[mu]['y_data']
-        distances = all_data[mu]['distances']
-        rounded_dist = np.round(distances, 4)
-        
-        dist_indices = np.where(np.isclose(rounded_dist, target_dist_val))[0]
-        
-        if len(dist_indices) == 0:
-            Z[:, j] = np.nan
-            continue
-            
-        d_idx = dist_indices[0] # Take the first matching distance index
-        
-        N = len(unique_b)
-        for k in range(len(unique_c)):
-            row_idx = N * k + b_idx
-            Z[k, j] = y_data[row_idx, d_idx]
-            
-    fig = go.Figure(data=go.Heatmap(
-        z=Z,
-        x=mu_values,
-        y=unique_c,
-        colorscale='RdBu_r',
-        colorbar=dict(title=f"{quantity} [meV]")
+        if mu in sweep.data:
+            Z[:, j] = sweep.data[mu][:, b_idx, pair]
+
+    fig = go.Figure(go.Heatmap(
+        z=Z, x=mu_values, y=sweep.c_inter,
+        colorscale="RdBu_r", zmid=0, colorbar=dict(title=sweep.label),
     ))
-    
-    clean_y_title = "J_iso [meV]" if quantity == "J_iso_meV" else "D [meV]"
     fig.update_layout(
-        title=f"{clean_y_title} as a function of μ and c_inter<br><sup>(b ≈ {actual_b:.4f}, dist ≈ {target_dist_val:.4f})</sup>",
-        xaxis_title="Chemical Potential (μ) [eV]",
+        title=(f"{sweep.label} as a function of μ and c_inter"
+               f"<br><sup>(b ≈ {sweep.b[b_idx]:.4f}, dist ≈ {shell:.4f})</sup>"),
+        xaxis_title="Chemical potential (μ) [eV]",
         yaxis_title="c_inter [eV]",
-        width=800,
-        height=600,
-        template="plotly_white"
+        width=800, height=600,
+        template="plotly_white",
     )
-    
     fig.show()
+    return fig

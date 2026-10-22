@@ -65,7 +65,24 @@ DM = model.build_density_matrix(kT=0.01, fermi_level=0.0)
 | `calculate_chemical_potential(H, filling_per_cell, kT)` | Chemical potential for a given filling per unit cell |
 | `build_lattice_pairs(Nx, Ny, radius, atoms_per_cell)` | Neighbour pairs within `radius` on an open lattice |
 | `build_lattice_pairs_periodic(Nx, Ny, radius, atom_indices)` | Neighbour pairs with periodic boundaries in x and y |
-| `plot_interactive_mu_c`, `plot_interactive_mu_dist` | Interactive Plotly views of exchange parameters from saved `.npz` results |
+
+### Post-processing
+
+These functions read a sweep directory of `data_mu_{mu}.npz` files, one per chemical potential, each holding a full (`c_inter`, `b`) grid.
+
+| Name | Description |
+| --- | --- |
+| `load_sweep(save_dir, mu_values, quantity)` | Loads a sweep into a `Sweep` with axes `c_inter`, `b`, `distances` and `data[mu]` of shape (n_c, n_b, n_pairs) |
+| `plot_interactive_mu_c` | Quantity vs. b per pair, with a μ dropdown and a `c_inter` slider |
+| `plot_interactive_mu_dist` | Quantity vs. b, one subplot per `c_inter`, with a μ dropdown and a distance slider |
+| `plot_heatmap_mu_cinter` | Heatmap over (μ, `c_inter`) at a fixed b, for the nearest neighbour |
+| `interactive_dual_heatmap` | Mean and spread over (b, `c_inter`), with ipywidgets sliders (for Jupyter) |
+
+```python
+from magnetic_models import plot_interactive_mu_dist
+
+plot_interactive_mu_dist("results/bhz/bulk/run_20260407_170706", mu_values=[0.0, 0.5, 1.0])
+```
 
 ## License
 
